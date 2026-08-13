@@ -35,7 +35,8 @@ tracing-subscriber = { version = "0.3", features = [
     "fmt",
 ]}
 
-elasticsearch = { version = "9.0.0-alpha.1", git = "https://github.com/elastic/elasticsearch-rs", branch = "new-with-creds" }
+elasticsearch = "7.17.7-alpha.1"
+base64 = "0.22"
 
 # Async and http
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "io-std", "signal", "process"] }

@@ -19,14 +19,17 @@ mod base_tools;
 
 use crate::servers::IncludeExclude;
 use crate::utils::none_if_empty_string;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use elasticsearch::Elasticsearch;
 use elasticsearch::auth::Credentials;
 use elasticsearch::cert::CertificateValidation;
 use elasticsearch::http::Url;
+use elasticsearch::http::headers::{HeaderValue, USER_AGENT};
 use elasticsearch::http::response::Response;
-use http::header::USER_AGENT;
+use elasticsearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use http::request::Parts;
-use http::{HeaderValue, header};
+use http::header;
 use indexmap::IndexMap;
 use rmcp::RoleServer;
 use rmcp::model::ToolAnnotations;
@@ -69,20 +72,58 @@ pub struct ElasticsearchMcpConfig {
 }
 
 // A wrapper around an ES client that provides a client instance configured
-/// for a given request context (i.e. auth credentials)
+/// for a given request context (i.e. auth credentials).
+///
+/// The 7.x client cannot clone a transport with different credentials, so this
+/// provider keeps the configuration snapshot and rebuilds a client on demand.
 #[derive(Clone)]
-pub struct EsClientProvider(Elasticsearch);
+pub struct EsClientProvider {
+    url: Url,
+    base_credentials: Option<Credentials>,
+    ssl_skip_verify: bool,
+    user_agent: String,
+}
 
 impl EsClientProvider {
-    pub fn new(client: Elasticsearch) -> Self {
-        EsClientProvider(client)
+    pub fn new(
+        url: Url,
+        base_credentials: Option<Credentials>,
+        ssl_skip_verify: bool,
+        user_agent: String,
+    ) -> Self {
+        EsClientProvider {
+            url,
+            base_credentials,
+            ssl_skip_verify,
+            user_agent,
+        }
+    }
+
+    /// Build a client from the provider snapshot, optionally overriding the
+    /// base credentials with request-specific ones.
+    fn build_client(&self, credentials: Option<Credentials>) -> Result<Elasticsearch, rmcp::Error> {
+        let pool = SingleNodeConnectionPool::new(self.url.clone());
+        let mut transport = TransportBuilder::new(pool);
+        if let Some(creds) = credentials {
+            transport = transport.auth(creds);
+        }
+        if self.ssl_skip_verify {
+            transport = transport.cert_validation(CertificateValidation::None);
+        }
+        transport = transport.header(
+            USER_AGENT,
+            HeaderValue::from_str(&self.user_agent).map_err(internal_error)?,
+        );
+        let transport = transport.build().map_err(internal_error)?;
+        Ok(Elasticsearch::new(transport))
     }
 
     /// If the incoming request is a http request and has an `Authorization` header, use it
     /// to authenticate to the remote ES instance.
-    pub fn get(&self, context: RequestContext<RoleServer>) -> Cow<'_, Elasticsearch> {
-        let client = &self.0;
-
+    pub fn get(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Cow<'_, Elasticsearch>, rmcp::Error> {
         let Some(mut auth) = context
             .extensions
             .get::<Parts>()
@@ -90,7 +131,7 @@ impl EsClientProvider {
             .and_then(|h| h.to_str().ok())
         else {
             // No auth
-            return Cow::Borrowed(client);
+            return self.build_client(self.base_credentials.clone()).map(Cow::Owned);
         };
 
         // MCP inspector insists on sending a bearer token and prepends "Bearer" to the value provided
@@ -98,12 +139,59 @@ impl EsClientProvider {
             auth = auth.trim_start_matches("Bearer ");
         }
 
-        let transport = client
-            .transport()
-            .clone_with_auth(Some(Credentials::AuthorizationHeader(auth.to_string())));
-
-        Cow::Owned(Elasticsearch::new(transport))
+        let credentials = credentials_from_authorization_header(auth)?;
+        self.build_client(Some(credentials)).map(Cow::Owned)
     }
+}
+
+/// Parse an `Authorization` header value into client credentials.
+///
+/// Supported schemes: `ApiKey <base64(id:key)>`, `Basic <base64(username:password)>`
+/// and `Bearer <token>`. The 7.x client re-encodes the decoded credentials into a
+/// header that is byte-equivalent to the original value (for valid input).
+fn credentials_from_authorization_header(auth: &str) -> Result<Credentials, rmcp::Error> {
+    let Some((scheme, value)) = auth.split_once(' ') else {
+        return Err(rmcp::Error::internal_error(
+            "Invalid Authorization header: expected '<scheme> <credentials>'",
+            None,
+        ));
+    };
+
+    match scheme {
+        "ApiKey" => {
+            let (id, key) = decode_pair(value, "API key").map_err(anyhow_to_internal)?;
+            Ok(Credentials::ApiKey(id, key))
+        }
+        "Basic" => {
+            let (username, password) = decode_pair(value, "Basic credentials").map_err(anyhow_to_internal)?;
+            Ok(Credentials::Basic(username, password))
+        }
+        "Bearer" => Ok(Credentials::Bearer(value.to_string())),
+        _ => Err(rmcp::Error::internal_error(
+            format!("Unsupported authorization scheme '{scheme}'"),
+            None,
+        )),
+    }
+}
+
+/// Map an anyhow error to an internal error of the MCP server.
+fn anyhow_to_internal(e: anyhow::Error) -> rmcp::Error {
+    rmcp::Error::internal_error(e.to_string(), None)
+}
+
+/// Decode `base64(first:second)` into its two parts.
+fn decode_pair(encoded: &str, description: &str) -> anyhow::Result<(String, String)> {
+    let decoded = STANDARD
+        .decode(encoded.trim())
+        .map_err(|e| anyhow::Error::msg(format!("Invalid base64 for {description}: {e}")))?;
+    let decoded = String::from_utf8(decoded)
+        .map_err(|e| anyhow::Error::msg(format!("{description} is not valid UTF-8: {e}")))?;
+    let Some((first, second)) = decoded.split_once(':') else {
+        return Err(anyhow::Error::msg(format!(
+            "{description} must be the base64 encoding of 'first:second'"
+        )));
+    };
+    Ok((first.to_string(), second.to_string()))
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -116,14 +204,12 @@ pub struct Tools {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CustomTool {
-    Esql(EsqlTool),
     SearchTemplate(SearchTemplateTool),
 }
 
 impl CustomTool {
     pub fn base(&self) -> &ToolBase {
         match self {
-            CustomTool::Esql(esql) => &esql.base,
             CustomTool::SearchTemplate(search_template) => &search_template.base,
         }
     }
@@ -134,26 +220,6 @@ pub struct ToolBase {
     pub description: String,
     pub parameters: IndexMap<String, schemars::schema::SchemaObject>,
     pub annotations: Option<ToolAnnotations>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EsqlTool {
-    #[serde(flatten)]
-    base: ToolBase,
-    query: String,
-    #[serde(default)]
-    format: EsqlResultFormat,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum EsqlResultFormat {
-    #[default]
-    // Output as JSON, either as an array of objects or as a single object.
-    Json,
-    // If a single object with a single property, output only its value
-    Value,
-    //Csv,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -176,8 +242,10 @@ pub struct ElasticsearchMcp {}
 
 impl ElasticsearchMcp {
     pub fn new_with_config(config: ElasticsearchMcpConfig, container_mode: bool) -> anyhow::Result<base_tools::EsBaseTools> {
+        // The configured API key is the base64 encoding of `id:key`
         let creds = if let Some(api_key) = config.api_key.clone() {
-            Some(Credentials::EncodedApiKey(api_key))
+            let (id, key) = decode_pair(&api_key, "API key")?;
+            Some(Credentials::ApiKey(id, key))
         } else if let Some(username) = config.username.clone() {
             let pwd = config.password.clone().ok_or(anyhow::Error::msg("missing password"))?;
             Some(Credentials::Basic(username, pwd))
@@ -195,22 +263,12 @@ impl ElasticsearchMcp {
             rewrite_localhost(&mut url)?;
         }
 
-        let pool = elasticsearch::http::transport::SingleNodeConnectionPool::new(url.clone());
-        let mut transport = elasticsearch::http::transport::TransportBuilder::new(pool);
-        if let Some(creds) = creds {
-            transport = transport.auth(creds);
-        }
-        if config.ssl_skip_verify {
-            transport = transport.cert_validation(CertificateValidation::None)
-        }
-        transport = transport.header(
-            USER_AGENT,
-            HeaderValue::from_str(&format!("elastic-mcp/{}", env!("CARGO_PKG_VERSION")))?,
-        );
-        let transport = transport.build()?;
-        let es_client = Elasticsearch::new(transport);
-
-        Ok(base_tools::EsBaseTools::new(es_client))
+        Ok(base_tools::EsBaseTools::new(EsClientProvider::new(
+            url,
+            creds,
+            config.ssl_skip_verify,
+            format!("elastic-mcp/{}", env!("CARGO_PKG_VERSION")),
+        )))
     }
 }
 

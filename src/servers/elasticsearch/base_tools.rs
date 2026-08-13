@@ -18,7 +18,7 @@
 use crate::servers::elasticsearch::{EsClientProvider, read_json};
 use elasticsearch::cat::{CatIndicesParts, CatShardsParts};
 use elasticsearch::indices::IndicesGetMappingParts;
-use elasticsearch::{Elasticsearch, SearchParts};
+use elasticsearch::SearchParts;
 use indexmap::IndexMap;
 use rmcp::handler::server::tool::{Parameters, ToolRouter};
 use rmcp::model::{
@@ -39,9 +39,9 @@ pub struct EsBaseTools {
 }
 
 impl EsBaseTools {
-    pub fn new(es_client: Elasticsearch) -> Self {
+    pub fn new(es_client: EsClientProvider) -> Self {
         Self {
-            es_client: EsClientProvider::new(es_client),
+            es_client,
             tool_router: Self::tool_router(),
         }
     }
@@ -72,12 +72,6 @@ struct SearchParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct EsqlQueryParams {
-    /// Complete Elasticsearch ES|QL query
-    query: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct GetShardsParams {
     /// Optional index name to get shard information for
     index: Option<String>,
@@ -96,7 +90,7 @@ impl EsBaseTools {
         req_ctx: RequestContext<RoleServer>,
         Parameters(ListIndicesParams { index_pattern }): Parameters<ListIndicesParams>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let es_client = self.es_client.get(req_ctx);
+        let es_client = self.es_client.get(req_ctx)?;
         let response = es_client
             .cat()
             .indices(CatIndicesParts::Index(&[&index_pattern]))
@@ -124,7 +118,7 @@ impl EsBaseTools {
         req_ctx: RequestContext<RoleServer>,
         Parameters(GetMappingsParams { index }): Parameters<GetMappingsParams>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let es_client = self.es_client.get(req_ctx);
+        let es_client = self.es_client.get(req_ctx)?;
         let response = es_client
             .indices()
             .get_mapping(IndicesGetMappingParts::Index(&[&index]))
@@ -160,7 +154,7 @@ impl EsBaseTools {
             query_body,
         }): Parameters<SearchParams>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let es_client = self.es_client.get(req_ctx);
+        let es_client = self.es_client.get(req_ctx)?;
 
         let mut query_body = query_body;
 
@@ -218,40 +212,6 @@ impl EsBaseTools {
     }
 
     //---------------------------------------------------------------------------------------------
-    /// Tool: ES|QL
-    #[tool(
-        description = "Perform an Elasticsearch ES|QL query.",
-        annotations(title = "Elasticsearch ES|QL query", read_only_hint = true)
-    )]
-    async fn esql(
-        &self,
-        req_ctx: RequestContext<RoleServer>,
-        Parameters(EsqlQueryParams { query }): Parameters<EsqlQueryParams>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let es_client = self.es_client.get(req_ctx);
-
-        let request = EsqlQueryRequest { query };
-
-        let response = es_client.esql().query().body(request).send().await;
-        let response: EsqlQueryResponse = read_json(response).await?;
-
-        // Transform response into an array of objects
-        let mut objects: Vec<Value> = Vec::new();
-        for row in response.values.into_iter() {
-            let mut obj = Map::new();
-            for (i, value) in row.into_iter().enumerate() {
-                obj.insert(response.columns[i].name.clone(), value);
-            }
-            objects.push(Value::Object(obj));
-        }
-
-        Ok(CallToolResult::success(vec![
-            Content::text("Results"),
-            Content::json(objects)?,
-        ]))
-    }
-
-    //---------------------------------------------------------------------------------------------
     // Tool: get shard information
     #[tool(
         description = "Get shard information for all or specific indices.",
@@ -262,7 +222,7 @@ impl EsBaseTools {
         req_ctx: RequestContext<RoleServer>,
         Parameters(GetShardsParams { index }): Parameters<GetShardsParams>,
     ) -> Result<CallToolResult, rmcp::Error> {
-        let es_client = self.es_client.get(req_ctx);
+        let es_client = self.es_client.get(req_ctx)?;
 
         let indices: [&str; 1];
         let parts = match &index {
@@ -375,25 +335,4 @@ pub struct MappingProperty {
     pub type_: String,
     #[serde(flatten)]
     pub settings: HashMap<String, serde_json::Value>,
-}
-
-//----- ES|QL
-
-#[derive(Serialize, Deserialize)]
-pub struct EsqlQueryRequest {
-    pub query: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Column {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub type_: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct EsqlQueryResponse {
-    pub is_partial: Option<bool>,
-    pub columns: Vec<Column>,
-    pub values: Vec<Vec<Value>>,
 }

@@ -92,7 +92,7 @@ async fn end_to_end() -> anyhow::Result<()> {
             // Check API key
             assert_eq!(
                 headers.get("Authorization").unwrap().to_str().unwrap(),
-                "ApiKey value-from-the-test"
+                "ApiKey dGVzdC1pZDp0ZXN0LWtleQ=="
             );
             axum::Json(json!([
               {
@@ -146,7 +146,7 @@ async fn end_to_end() -> anyhow::Result<()> {
         .post(url)
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
-        .header("Authorization", "ApiKey value-from-the-test")
+        .header("Authorization", "ApiKey dGVzdC1pZDp0ZXN0LWtleQ==")
         .json(&body)
         .send()
         .await?

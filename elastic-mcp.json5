@@ -15,18 +15,6 @@
 
         // Custom tools
         "custom": {
-          // An ES|QL query
-          "add-42": {
-            "type": "esql",
-            "description": "Adds 42 to the input value",
-            "query": "row value = ?value | eval result = value + 42 | keep result",
-            "parameters": {
-              "value": {
-                "title": "The value",
-                "type": "number"
-              }
-            }
-          },
           // A stored search template
           "a-stored-template": {
             "type": "search_template",

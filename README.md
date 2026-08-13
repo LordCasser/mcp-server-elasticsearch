@@ -15,7 +15,7 @@ Follow these steps to deploy and configure the Elasticsearch MCP Server containe
 
 Before you start, ensure you have:
 
-- An Elasticsearch cluster (version 8.x or 9.x) accessible from your AWS environment
+- An Elasticsearch cluster (version 7.x) accessible from your AWS environment
 - Elasticsearch authentication credentials:
   - An [API key](https://www.elastic.co/docs/deploy-manage/api-keys), or
   - A [username](https://www.elastic.co/docs/deploy-manage/users-roles) and password pair
@@ -261,7 +261,6 @@ Once connected, the MCP server provides these tools to your agent:
 - `list_indices`: List all available Elasticsearch indices
 - `get_mappings`: Get field mappings for a specific Elasticsearch index
 - `search`: Perform an Elasticsearch search using query DSL
-- `esql`: Execute an ES|QL query
 - `get_shards`: Get shard information for all or specific indices
 
 Your agent can use these tools to interact with your Elasticsearch data through natural language conversations.
