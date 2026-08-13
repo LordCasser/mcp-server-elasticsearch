@@ -296,8 +296,8 @@ pub struct Hit {
 pub struct CatIndexResponse {
     pub index: String,
     pub status: String,
-    #[serde(rename = "docs.count", deserialize_with = "deserialize_number_from_string")]
-    pub doc_count: u64,
+    #[serde(rename = "docs.count", deserialize_with = "deserialize_option_number_from_string")]
+    pub doc_count: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -314,7 +314,6 @@ pub struct CatShardsResponse {
 }
 
 //----- Index mappings
-
 pub type MappingResponse = HashMap<String, Mappings>;
 
 #[derive(Serialize, Deserialize)]
@@ -335,4 +334,23 @@ pub struct MappingProperty {
     pub type_: String,
     #[serde(flatten)]
     pub settings: HashMap<String, serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CatIndexResponse;
+
+    #[test]
+    fn cat_index_response_accepts_null_doc_count() {
+        // ES 7.x returns `"docs.count": null` for unassigned/red indices
+        // (e.g. .kibana_task_manager_1). Deserialization must not fail.
+        let json = r#"[
+            {"index": "healthy", "status": "open", "docs.count": "42"},
+            {"index": "unavailable", "status": "open", "docs.count": null}
+        ]"#;
+        let parsed: Vec<CatIndexResponse> = serde_json::from_str(json).expect("parse must succeed");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].doc_count, Some(42));
+        assert_eq!(parsed[1].doc_count, None);
+    }
 }
