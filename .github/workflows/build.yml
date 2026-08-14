@@ -67,7 +67,14 @@ jobs:
         if: ${{ matrix.target.name == 'linux-arm64' }}
         run: |
           sudo dpkg --add-architecture arm64
-          sudo apt update && sudo apt install -y gcc-aarch64-linux-gnu libssl-dev:arm64
+          # The arm64 index download on GitHub runners is flaky; retry.
+          for i in 1 2 3; do
+            if sudo apt-get -o Acquire::Retries=5 update && sudo apt-get -o Acquire::Retries=5 install -y gcc-aarch64-linux-gnu libssl-dev:arm64; then
+              break
+            fi
+            echo "apt attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
           # Fail fast with diagnostics if the cross compiler is not on PATH
           command -v aarch64-linux-gnu-gcc || { ls /usr/bin/aarch64*; exit 1; }
           mkdir -p checkout-tag/.cargo
