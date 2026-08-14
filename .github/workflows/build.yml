@@ -84,6 +84,11 @@ jobs:
           target: ${{ matrix.target.target }}
           args: "--locked --release"
           working-directory: ${{ github.workspace }}/checkout-tag
+          # linux-arm64 builds directly on the runner so that the arm64
+          # OpenSSL dev libraries (libssl-dev:arm64) are visible to
+          # openssl-sys; the default cross (Docker) container does not
+          # contain them.
+          use-cross: ${{ matrix.target.name == 'linux-arm64' && 'false' || 'true' }}
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
